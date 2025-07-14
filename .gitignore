@@ -1,0 +1,16 @@
+bazel-*
+bazel-out/
+bazel-bin/
+bazel-testlogs/
+bazel-execroot/
+
+*.runfiles
+*.runfiles_manifest
+*.runfiles_inputs
+*.runfiles_root
+
+*.o
+*.so
+*.a
+
+build/
