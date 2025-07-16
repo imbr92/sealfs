@@ -1,9 +1,6 @@
-// TODO: Double check used version
-#define FUSE_USE_VERSION 34
-
+#include "common.hpp"
 #include "state.hpp"
 
-#include <fuse3/fuse_lowlevel.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <stdio.h>
