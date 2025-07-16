@@ -1,6 +1,8 @@
 // TODO: Double check used version
 #define FUSE_USE_VERSION 34
 
+#include "state.hpp"
+
 #include <fuse3/fuse_lowlevel.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -12,152 +14,8 @@
 #include <unistd.h>
 #include <assert.h>
 
-#include <limits>
 #include <iostream>
-#include <vector>
 #include <format>
-#include <unordered_map>
-
-// TODO: For now, make configurable, etc. later
-const char* LOG_FILE = "~/sealfs.log";
-const fuse_ino_t LEAF_OFFSET = std::numeric_limits<fuse_ino_t>::max() >> 1;
-
-namespace SealFS{
-
-enum class sealfs_ino_t { FILE, DIR };
-
-
-struct inode_entry {
-    // TODO: Probably not even needed separately if its stored in stat already...
-    fuse_ino_t ino;
-    struct stat st;
-
-    char* name;
-    sealfs_ino_t type;
-
-    // Probably not needed..., don't plan on this being fully in memory
-    // void *data;
-    // size_t data_len;
-};
-
-struct SealFSData{
-private:
-    fuse_ino_t rel_next_dir_ino = 1, rel_next_file_ino = 2;
-    std::vector<inode_entry> file_inodes{2}, dir_inodes{1};
-    // TODO: Consider std::string_view + external std::string storage for lookups to not require std::string creation on each call
-    std::vector<std::unordered_map<std::string, fuse_ino_t>> dirs{1};
-public:
-
-
-    inline fuse_ino_t next_dir_ino(){
-        return rel_next_dir_ino;
-    }
-
-    inline fuse_ino_t next_file_ino(){
-        return rel_next_dir_ino + LEAF_OFFSET;
-    }
-
-    // Only return inode num
-    inline fuse_ino_t lookup(fuse_ino_t parent, const char* name){
-        std::cerr << std::format("[lookup] parent: {} name: {}\n", parent, name);
-        if(dir_inodes.size() <= parent){
-            // TODO: Add logging here
-            std::cerr << std::format("\tCould not find parent: {}, dir_inodes.size(): {}\n", parent, dir_inodes.size());
-            return -1;
-        }
-        const auto& cdir = dirs[parent];
-        auto it = cdir.find(name);
-        if(it == cdir.end()){
-            // TODO: Add logging here
-            std::cerr << std::format("\tCould not find name: {} under parent: {}\n", name, parent);
-            return -1;
-        }
-        return it->second;
-    }
-
-    // Return inode entry
-    inline const inode_entry* lookup_entry(fuse_ino_t parent, const char* name){
-        fuse_ino_t cur_ino = lookup(parent, name);
-        std::cerr << std::format("[lookup_entry] parent: {} name: {}\n", parent, name);
-        if(cur_ino == static_cast<fuse_ino_t>(-1)){
-            // TODO: Add logging here
-            std::cerr << std::format("\tlookup(parent={}, name={}) returned -1\n", parent, name);
-            return nullptr;
-        }
-        return lookup_entry(cur_ino);
-    }
-
-    inline const inode_entry* lookup_entry(fuse_ino_t cur_ino){
-        std::cerr << std::format("[lookup_entry] cur_ino: {}\n", cur_ino);
-        if(cur_ino < LEAF_OFFSET){
-            if(cur_ino >= dir_inodes.size()){
-                // TODO: Add logging here
-                std::cerr << std::format("\tFailed to find dir inode with ino {}, dir_inodes.size() = {}\n", cur_ino, dir_inodes.size());
-                return nullptr;
-            }
-            return &dir_inodes[cur_ino];
-        }
-        else{
-            cur_ino -= LEAF_OFFSET;
-            if(cur_ino >= file_inodes.size()){
-                // TODO: Add logging here
-                std::cerr << std::format("\tFailed to find file inode with ino {}, file_inodes.size() = {}\n", cur_ino, file_inodes.size());
-                return nullptr;
-            }
-            return &file_inodes[cur_ino];
-        }
-    }
-
-    // Create file/dir in appropriate list and return ptr to inode_entry
-    inline inode_entry* create_inode_entry(const char* name, sealfs_ino_t type, mode_t mode){
-        mode_t mask;
-        inode_entry* cur_entry = nullptr;
-
-        std::cerr << std::format("[create_inode_entry] name: {}, type: {}, mode: {}\n", name, static_cast<int>(type), mode);
-
-        if(type == sealfs_ino_t::FILE){
-            file_inodes.emplace_back();
-            cur_entry = &file_inodes.back();
-            cur_entry->ino = next_file_ino();
-            cur_entry->st.st_ino = next_file_ino();
-            rel_next_file_ino++;
-            cur_entry->st.st_nlink = 1;
-            mask = S_IFREG;
-        }
-        else{
-            dirs.emplace_back();
-            dir_inodes.emplace_back();
-            cur_entry = &dir_inodes.back();
-            cur_entry->ino = next_dir_ino();
-            cur_entry->st.st_ino = next_dir_ino();
-            rel_next_dir_ino++;
-            cur_entry->st.st_nlink = 2;
-            mask = S_IFDIR;
-        }
-
-        cur_entry->name = strdup(name);
-
-        time_t now = time(NULL);
-        cur_entry->st.st_atime = now;
-        cur_entry->st.st_mtime = now;
-        cur_entry->st.st_ctime = now;
-
-        cur_entry->st.st_size = 0;
-        // restrict to permission bits only
-        cur_entry->st.st_mode = mask | (mode & 0777);
-        // what to do about uid/gid?
-        return cur_entry;
-    }
-
-    inline void create_parent_mapping(const char* name, fuse_ino_t child, fuse_ino_t parent){
-        std::cerr << std::format("[create_parent_mapping] name: {}, child: {}, parent: {}\n", name, child, parent);
-        // TODO: Add error checking if name already exists, etc.?
-        dirs[parent][name] = child;
-    }
-
-};
-
-} // namespace SealFS
 
 static void sealfs_init(void* userdata, struct fuse_conn_info *conn){
     (void) conn;
@@ -210,9 +68,7 @@ static void sealfs_lookup(fuse_req_t req, fuse_ino_t parent, const char* name){
         e.entry_timeout = 1.0;
 
         e.attr = ret->st;
-        std::cerr << ret->st.st_ino << '\n';
-        std::cerr << ret->name << '\n';
-        std::cerr << ret->ino << '\n';
+        std::cerr << std::format("\tret fields are name: {} ino: {} st_ino: {}\n", ret->name, ret->ino, ret->st.st_ino);
 
         fuse_reply_entry(req, &e);
     }
@@ -228,14 +84,13 @@ static void sealfs_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info
         std::cerr << std::format("\tret is nullptr\n");
         fuse_reply_err(req, ENOENT);
     }
+    else{
+        // TODO: Maybe do something else for timeouts?
+        const double attr_timeout = 1.0;
+        std::cerr << std::format("\tret fields are name: {} ino: {} st_ino: {}\n", ret->name, ret->ino, ret->st.st_ino);
 
-    // TODO: Maybe do something else for timeouts?
-    const double attr_timeout = 1.0;
-
-    std::cerr << ret->st.st_ino << '\n';
-    std::cerr << ret->name << '\n';
-    std::cerr << ret->ino << '\n';
-    fuse_reply_attr(req, &ret->st, attr_timeout);
+        fuse_reply_attr(req, &ret->st, attr_timeout);
+    }
 }
 
 
