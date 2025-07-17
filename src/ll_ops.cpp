@@ -150,10 +150,26 @@ void sealfs_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, stru
     buf.reply(off, size);
 }
 
+void sealfs_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
+	 //    * Valid replies:
+	 // *   fuse_reply_open
+	 // *   fuse_reply_err
+	 // *
+	 // * @param req request handle
+	 // * @param ino the inode number
+	 // * @param fi file information
+
+
+}
+
+
 const struct fuse_lowlevel_ops sealfs_oper = {
     .init = sealfs_init,
     .lookup = sealfs_lookup,
     .getattr = sealfs_getattr,
+
+    // TODO: Figure out why I am warned to put this before open/readdir
+    .open = sealfs_open,
 
     .opendir = sealfs_opendir,
     .readdir = sealfs_readdir,
