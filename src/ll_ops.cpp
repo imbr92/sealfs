@@ -101,19 +101,25 @@ void sealfs_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi){
     fuse_reply_open(req, fi);
 }
 
+// Wrapper for buffer containing all fuse_direntrys (not a real struct, conceptual notion)
 struct dirbuf {
-    char *p;
-    size_t size;
+    char *p; // Each fuse_direntry is packed into p
+    size_t size; // Size of p (all packed fuse_direntrys so far)
 };
 
-void dirbuf_add(SealFS::SealFSData* fs, fuse_req_t req, struct dirbuf* b, const char *name, fuse_ino_t ino){
+// Given a possibly existing buffer b of fuse_direntrys, pack in this new one with ino = ino, name = name
+void dirbuf_add(SealFS::SealFSData* fs, fuse_req_t req, struct dirbuf* b, const char* name, fuse_ino_t ino){
     size_t oldsize = b->size;
+    // Figure out size of fuse_direntry required to pack. Note that only a fixed number of bits from stat are used, so we don't actually need to pass in the stat struct to get the correct size (name is the only entry of variable length)
     b->size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
     b->p = (char*) realloc(b->p, b->size);
     const SealFS::inode_entry* ent = fs->lookup_entry(ino);
+
+    // Actually add the fuse_direntry corresponding to this (name, ino) to buffer b
     fuse_add_direntry(req, b->p + oldsize, b->size - oldsize, name, &ent->st, b->size);
 }
 
+// Add buffer b to reply, respect offset (off) and maxsize for kernel pagination
 int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize, off_t off, size_t maxsize){
     if(off < bufsize){
         return fuse_reply_buf(req, buf + off, std::min(bufsize - off, maxsize));
@@ -131,19 +137,17 @@ void sealfs_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, stru
 
     SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
 
-    struct dirbuf b;
-
-    memset(&b, 0, sizeof(b));
-    dirbuf_add(fs, req, &b, ".", ino);
-    dirbuf_add(fs, req, &b, "..", ino);
+    SealFS::DirBuf buf(req);
+    buf.add_entry(fs, ".", ino);
+    // TODO: use parent's ino instead of ino here
+    buf.add_entry(fs, "..", ino);
 
     auto children = fs->get_children(ino);
     for(const auto &[name, child_ino] : children){
-        dirbuf_add(fs, req, &b, name.c_str(), child_ino);
+        buf.add_entry(fs, name.c_str(), child_ino);
     }
 
-    reply_buf_limited(req, b.p, b.size, off, size);
-    free(b.p);
+    buf.reply(off, size);
 }
 
 const struct fuse_lowlevel_ops sealfs_oper = {

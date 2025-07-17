@@ -41,9 +41,8 @@ private:
     std::vector<inode_entry> file_inodes{2}, dir_inodes{1};
     // TODO: Consider std::string_view + external std::string storage for lookups to not require std::string creation on each call
     std::vector<std::unordered_map<std::string, fuse_ino_t>> dirs{1};
+
 public:
-
-
     fuse_ino_t next_dir_ino();
 
     fuse_ino_t next_file_ino();
@@ -64,6 +63,23 @@ public:
 
     void create_parent_mapping(const char* name, fuse_ino_t child, fuse_ino_t parent);
 
+};
+
+// Wrapper for buffer containing all fuse_direntrys (not a real struct, conceptual notion)
+class DirBuf{
+private:
+    fuse_req_t req;
+    char *p; // Each fuse_direntry is packed into p
+    size_t size; // Size of p (all packed fuse_direntrys so far)
+
+public:
+    DirBuf(fuse_req_t req);
+
+    void add_entry(SealFS::SealFSData* fs, const char* name, fuse_ino_t ino);
+
+    int reply(off_t off, size_t maxsize);
+
+    ~DirBuf();
 };
 
 } // namespace SealFS

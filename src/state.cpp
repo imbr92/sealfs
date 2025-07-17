@@ -141,3 +141,31 @@ const std::unordered_map<std::string, fuse_ino_t>& SealFSData::get_children(fuse
     }
 }
 
+DirBuf::DirBuf(fuse_req_t req): req(req), p(nullptr), size(0) {};
+
+// Given a possibly existing buffer b of fuse_direntrys, pack in this new one with ino = ino, name = name
+void DirBuf::add_entry(SealFS::SealFSData* fs, const char* name, fuse_ino_t ino){
+    size_t oldsize = size;
+    // Figure out size of fuse_direntry required to pack. Note that only a fixed number of bits from stat are used, so we don't actually need to pass in the stat struct to get the correct size (name is the only entry of variable length)
+    size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
+    p = (char*) realloc(p, size);
+    const SealFS::inode_entry* ent = fs->lookup_entry(ino);
+
+    // Actually add the fuse_direntry corresponding to this (name, ino) to buffer b
+    fuse_add_direntry(req, p + oldsize, size - oldsize, name, &ent->st, size);
+}
+
+// Add buffer b to reply, respect offset (off) and maxsize for kernel pagination
+int DirBuf::reply(off_t off, size_t maxsize){
+    if(off < size){
+        return fuse_reply_buf(req, p + off, std::min(size - off, maxsize));
+    }
+    else{
+        return fuse_reply_buf(req, NULL, 0);
+    }
+}
+
+DirBuf::~DirBuf(){
+    free(p);
+}
+
