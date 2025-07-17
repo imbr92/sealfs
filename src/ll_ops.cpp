@@ -61,6 +61,7 @@ void sealfs_lookup(fuse_req_t req, fuse_ino_t parent, const char* name){
         fuse_reply_err(req, ENOENT);
     }
     else{
+        e.ino = ret->ino;
         // TODO: Maybe do something else for timeouts?
         e.attr_timeout = 1.0;
         e.entry_timeout = 1.0;
@@ -90,3 +91,82 @@ void sealfs_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
         fuse_reply_attr(req, &ret->st, attr_timeout);
     }
 }
+
+void sealfs_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi){
+    std::cerr << std::format("[sealfs_opendir] ino: {}\n", ino);
+
+    // Optionally store a file handle here if you want to track dir state
+    fi->fh = 0;
+
+    fuse_reply_open(req, fi);
+}
+
+struct dirbuf {
+    char *p;
+    size_t size;
+};
+
+void dirbuf_add(SealFS::SealFSData* fs, fuse_req_t req, struct dirbuf* b, const char *name, fuse_ino_t ino){
+    size_t oldsize = b->size;
+    b->size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
+    b->p = (char*) realloc(b->p, b->size);
+    const SealFS::inode_entry* ent = fs->lookup_entry(ino);
+    fuse_add_direntry(req, b->p + oldsize, b->size - oldsize, name, &ent->st, b->size);
+}
+
+int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize, off_t off, size_t maxsize){
+    if(off < bufsize){
+        return fuse_reply_buf(req, buf + off, std::min(bufsize - off, maxsize));
+    }
+    else{
+        return fuse_reply_buf(req, NULL, 0);
+    }
+}
+
+void sealfs_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi){
+    // TODO: Maybe use? If needed might need to implement opendir
+    (void) fi;
+
+    std::cerr << std::format("[sealfs_readdir] ino: {} size: {} off: {}\n", ino, size, off);
+
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+
+    struct dirbuf b;
+
+    memset(&b, 0, sizeof(b));
+    dirbuf_add(fs, req, &b, ".", ino);
+    dirbuf_add(fs, req, &b, "..", ino);
+
+    auto children = fs->get_children(ino);
+    for(const auto &[name, child_ino] : children){
+        dirbuf_add(fs, req, &b, name.c_str(), child_ino);
+    }
+
+    reply_buf_limited(req, b.p, b.size, off, size);
+    free(b.p);
+}
+
+const struct fuse_lowlevel_ops sealfs_oper = {
+    .init = sealfs_init,
+    .lookup = sealfs_lookup,
+    .getattr = sealfs_getattr,
+
+    .opendir = sealfs_opendir,
+    .readdir = sealfs_readdir,
+
+    /*
+     * Basics:
+     *  - Path traversal: lookup, getattr, readdir
+     *  - Creating/Modifying files: create/mknod, mkdir, read, write
+     *  - File Lifecycle: unlink, rmdir, rename
+     *  - Open/Close flow: open, release
+     *  - Optional but Useful: flush, fsync, init, destroy
+     */
+    // .fuse_lowlevel_init = stuff
+        // .open = hello_ll_open,
+        // .read = hello_ll_read,
+        // .setxattr = hello_ll_setxattr,
+        // .getxattr = hello_ll_getxattr,
+        // .removexattr = hello_ll_removexattr,
+};
+

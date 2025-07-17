@@ -15,8 +15,6 @@ cc_library(
     linkopts = ["-lfuse3"],
 )
 
-
-
 cc_binary(
     name = "sealfs",
     srcs = ["main.cpp"],

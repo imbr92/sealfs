@@ -56,6 +56,9 @@ public:
 
     const inode_entry* lookup_entry(fuse_ino_t cur_ino);
 
+    // Require parent_ino to be a dir
+    const std::unordered_map<std::string, fuse_ino_t>& get_children(fuse_ino_t parent_ino);
+
     // Create file/dir in appropriate list and return ptr to inode_entry
     inode_entry* create_inode_entry(const char* name, sealfs_ino_t type, mode_t mode);
 

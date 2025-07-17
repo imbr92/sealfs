@@ -89,6 +89,7 @@ inode_entry* SealFSData::create_inode_entry(const char* name, sealfs_ino_t type,
         cur_entry->ino = next_file_ino();
         cur_entry->st.st_ino = next_file_ino();
         rel_next_file_ino++;
+        cur_entry->st.st_size = 0;
         cur_entry->st.st_nlink = 1;
         mask = S_IFREG;
     }
@@ -99,6 +100,7 @@ inode_entry* SealFSData::create_inode_entry(const char* name, sealfs_ino_t type,
         cur_entry->ino = next_dir_ino();
         cur_entry->st.st_ino = next_dir_ino();
         rel_next_dir_ino++;
+        cur_entry->st.st_size = 4096;
         cur_entry->st.st_nlink = 2;
         mask = S_IFDIR;
     }
@@ -110,7 +112,6 @@ inode_entry* SealFSData::create_inode_entry(const char* name, sealfs_ino_t type,
     cur_entry->st.st_mtime = now;
     cur_entry->st.st_ctime = now;
 
-    cur_entry->st.st_size = 0;
     // restrict to permission bits only
     cur_entry->st.st_mode = mask | (mode & 0777);
     // what to do about uid/gid?
@@ -122,3 +123,21 @@ void SealFSData::create_parent_mapping(const char* name, fuse_ino_t child, fuse_
     // TODO: Add error checking if name already exists, etc.?
     dirs[parent][name] = child;
 }
+
+const std::unordered_map<std::string, fuse_ino_t>& SealFSData::get_children(fuse_ino_t parent_ino){
+    std::cerr << std::format("[get_children] parent_ino: {}\n", parent_ino);
+    if(parent_ino < LEAF_OFFSET){
+        if(parent_ino >= dir_inodes.size()){
+            // TODO: Add logging here
+            std::cerr << std::format("\tFailed to find dir inode with ino {}, dir_inodes.size() = {}\n", parent_ino, dir_inodes.size());
+            throw std::exception();
+        }
+        return dirs[parent_ino];
+    }
+    else{
+        std::cerr << std::format("\tExpected parent ino, received file ino\n");
+        // TODO: Make this better
+        throw std::exception();
+    }
+}
+
