@@ -4,3 +4,11 @@
 #
 # For more details, please check https://github.com/bazelbuild/bazel/issues/18958
 ###############################################################################
+
+bazel_dep(name = "platforms", version = "0.0.8")
+
+bazel_dep(name = "spdlog", version = "1.15.3")
+
+bazel_dep(name = "fmt", version = "11.2.0")
+
+bazel_dep(name = "nlohmann_json", version = "3.12.0")

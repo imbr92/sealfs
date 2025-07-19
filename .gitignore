@@ -15,5 +15,6 @@ bazel-execroot/
 
 .cache/
 build/
+src/old/
 
 *.txt

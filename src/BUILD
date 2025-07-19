@@ -18,7 +18,13 @@ cc_library(
 cc_binary(
     name = "sealfs",
     srcs = ["main.cpp"],
-    deps = [":state", ":ll_ops"],
+    deps = [
+        ":state",
+        ":ll_ops",
+        "@spdlog//:spdlog",
+        "@fmt//:fmt",
+        "@nlohmann_json//:json"
+    ],
     copts = ["-std=c++20"],
     linkopts = ["-lfuse3"],
 )

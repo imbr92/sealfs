@@ -1,144 +1,321 @@
-#include "common.hpp"
 #include "state.hpp"
 
 #include <sys/stat.h>
-#include <time.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <assert.h>
 
-#include <iostream>
+#include <limits>
 #include <vector>
-#include <format>
+#include <string>
 #include <unordered_map>
 
+#include <filesystem>
+#include <regex>
+#include <iostream>
+#include <fstream>
+
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 using namespace SealFS;
 
-fuse_ino_t SealFSData::next_dir_ino(){
-    return rel_next_dir_ino;
+SealFSLock::SealFSLock(){}
+
+SealFSLock::SealFSLock(const std::filesystem::path& persistence_root)
+    : lock_path_(persistence_root / ".sealfs.lock"){
+    // TODO: See if I can move this elsewhere? Not a fan of this being done in the SealFSLock constructor...
+    if(!std::filesystem::exists(persistence_root) || !std::filesystem::is_directory(persistence_root)){
+        throw std::runtime_error(std::format("Path {} is not a valid directory", persistence_root.string()));
+    }
+
+    fd_ = open(lock_path_.c_str(), O_RDWR | O_CREAT, 0666);
+    if(fd_ == -1){
+        throw std::runtime_error("Failed to open lockfile: " + lock_path_.string());
+    }
+
+    if(lockf(fd_, F_TLOCK, 0) == -1){
+        close(fd_);
+        throw std::runtime_error("SealFS already mounted at: " + persistence_root.string());
+    }
 }
 
-fuse_ino_t SealFSData::next_file_ino(){
-    return rel_next_dir_ino + LEAF_OFFSET;
+SealFSLock::~SealFSLock(){
+    if(fd_ != -1){
+        lockf(fd_, F_ULOCK, 0);
+        close(fd_);
+    }
 }
 
-    // Only return inode num
+SealFSLock::SealFSLock(SealFSLock&& oth){
+    lock_path_ = std::move(oth.lock_path_);
+    fd_ = std::move(oth.fd_);
+    oth.lock_path_.clear();
+    oth.fd_ = -1;
+}
+
+SealFSLock& SealFSLock::operator=(SealFSLock&& oth){
+    if(this != &oth){
+        lock_path_ = std::move(oth.lock_path_);
+        fd_ = std::move(oth.fd_);
+        oth.lock_path_.clear();
+        oth.fd_ = -1;
+    }
+    return *this;
+}
+
+void SealFS::to_json(json& j, const inode_entry& inode){
+    j = json{
+        {"ino", inode.ino},
+        {"parent", inode.parent},
+        {"name", inode.name},
+        {"type", inode.type},
+        {"st", {
+            {"ino", inode.st.st_ino},
+            {"nlink", inode.st.st_nlink},
+            {"mode", inode.st.st_mode},
+            {"uid", inode.st.st_uid},
+            {"gid", inode.st.st_gid},
+            {"size", inode.st.st_size},
+            {"atime", inode.st.st_atime},
+            {"mtime", inode.st.st_mtime},
+            {"ctime", inode.st.st_ctime}
+        }},
+        {"children", inode.children}
+    };
+}
+
+void SealFS::from_json(const json& j, inode_entry& inode){
+    inode.ino = j.at("ino").get<fuse_ino_t>();
+    inode.parent = j.at("parent").get<fuse_ino_t>();
+    inode.name = j.at("name").get<std::string>();
+    inode.type = j.at("type").get<sealfs_ino_t>();
+
+    inode.st = {};
+    inode.st.st_ino = j.at("st").at("ino").get<ino_t>();
+    inode.st.st_nlink = j.at("st").at("nlink").get<nlink_t>();
+    inode.st.st_mode = j.at("st").at("mode").get<mode_t>();
+    inode.st.st_uid  = j.at("st").at("uid").get<uid_t>();
+    inode.st.st_gid  = j.at("st").at("gid").get<gid_t>();
+    inode.st.st_size = j.at("st").at("size").get<off_t>();
+    inode.st.st_atime = j.at("st").at("atime").get<time_t>();
+    inode.st.st_mtime = j.at("st").at("mtime").get<time_t>();
+    inode.st.st_ctime = j.at("st").at("ctime").get<time_t>();
+
+    if(j.contains("children") && !j.at("children").is_null()){
+        inode.children = j.at("children").get<std::unordered_map<std::string, fuse_ino_t>>();
+    }
+    else{
+        inode.children = std::nullopt;
+    }
+}
+
+
+void SealFSData::validate_persistence_root(){
+    std::filesystem::path structure_file = get_structure_path();
+    std::filesystem::path data_dir = get_data_path();
+
+
+    if(!std::filesystem::exists(structure_file)){
+        std::ofstream(structure_file);
+    }
+    else if(!std::filesystem::is_regular_file(structure_file)){
+        throw std::runtime_error(std::format("Structure file {} exists but is not a regular file", structure_file.string()));
+    }
+
+    if(!std::filesystem::exists(data_dir)){
+        if(!std::filesystem::create_directory(data_dir)){
+            throw std::runtime_error(std::format("Could not find or create data directory {}", data_dir.string()));
+        }
+    }
+    else if(!std::filesystem::is_directory(data_dir)){
+        throw std::runtime_error(std::format("Data directory {} exists but is not a directory", data_dir.string()));
+    }
+
+    std::regex valid_filename(R"(^\d+\.data$)");
+    for(const auto& entry : std::filesystem::directory_iterator(data_dir)){
+        std::string fname = entry.path().filename().string();
+        if(!std::filesystem::is_regular_file(entry)){
+            logger->warn("Non-file entry in data/: {}", fname);
+        }
+        if(!std::regex_match(fname, valid_filename)){
+            logger->warn("Unexpected file in data/: {}", fname);
+        }
+    }
+}
+
+// TODO: At some point switch over to an atomic write
+bool SealFSData::write_structure_to_disk(){
+    try{
+        nlohmann::json j = inodes;
+        std::ofstream out(get_structure_path());
+        out << j.dump(4);
+        return true;
+    }
+    catch(const std::exception& e){
+        logger->error("Failed to write structure.json: {}", e.what());
+        return false;
+    }
+}
+
+bool SealFSData::read_structure_from_disk(){
+    try{
+        std::ifstream in(get_structure_path());
+        if(!in.is_open() || in.peek() == std::ifstream::traits_type::eof()){
+            logger->warn("structure.json does not exist or is empty, initializing empty inodes");
+            return true;
+        }
+        nlohmann::json j;
+        in >> j;
+        inodes = j.get<std::unordered_map<fuse_ino_t, inode_entry>>();
+        return true;
+    }
+    catch(const std::exception& e){
+        logger->error("Failed to read structure.json: {}", e.what());
+        return false;
+    }
+}
+
+SealFSData::SealFSData(const std::filesystem::path& path): persistence_root(path), plock(persistence_root){
+    // TODO: Check whether this can take a std::filesystem::path directly?
+    std::filesystem::path log_file = get_log_path();
+    logger = spdlog::basic_logger_mt("SealFS Logger", log_file);
+    logger->info("Acquired lock on persistence root {}", persistence_root.string());
+
+    validate_persistence_root();
+
+    read_structure_from_disk();
+}
+
+SealFSData::SealFSData(){
+    persistence_root = DEFAULT_PERSISTENCE_ROOT;
+    plock = SealFSLock(persistence_root);
+
+    // TODO: Check whether this can take a std::filesystem::path directly?
+    std::filesystem::path log_file = get_log_path();
+    logger = spdlog::basic_logger_mt("SealFS Logger", log_file);
+    logger->info("Acquired lock on persistence root {}", persistence_root.string());
+
+    validate_persistence_root();
+
+    read_structure_from_disk();
+}
+
+SealFSData::~SealFSData(){
+    write_structure_to_disk();
+
+    logger->info("Releasing lock on persistence root {}", persistence_root.string());
+}
+
+fuse_ino_t SealFSData::get_parent(fuse_ino_t node){
+    auto it = inodes.find(node);
+    if(it == inodes.end()){
+        logger->error("Failed to find inode {}", node);
+        return -1;
+    }
+    return it->second.parent;
+}
+
+const std::optional<std::reference_wrapper<std::unordered_map<std::string, fuse_ino_t>>> SealFSData::get_children(fuse_ino_t node){
+    auto inode_entry = lookup_entry(node);
+    if(!inode_entry){
+        return std::nullopt;
+    }
+
+    auto& children = inode_entry.value().get().children;
+    if(!children) return std::nullopt;
+    else return children.value();
+}
+
 fuse_ino_t SealFSData::lookup(fuse_ino_t parent, const char* name){
-    std::cerr << std::format("[lookup] parent: {} name: {}\n", parent, name);
-    if(dir_inodes.size() <= parent){
-        // TODO: Add logging here
-        std::cerr << std::format("\tCould not find parent: {}, dir_inodes.size(): {}\n", parent, dir_inodes.size());
-        return -1;
+    logger->info("[lookup] parent: {} name: {}", parent, name);
+    auto children = get_children(parent);
+    if(!children.has_value()){
+        logger->error("Inode {} has no children", parent);
+        return INVALID_INODE;
     }
-    const auto& cdir = dirs[parent];
-    auto it = cdir.find(name);
-    if(it == cdir.end()){
-        // TODO: Add logging here
-        std::cerr << std::format("\tCould not find name: {} under parent: {}\n", name, parent);
-        return -1;
+    auto unwrapped_children = children.value().get();
+    auto it = unwrapped_children.find(name);
+    if(it == unwrapped_children.end()){
+        logger->error("Could not find child with name {} under inode {}", name, parent);
+        return INVALID_INODE;
     }
-    return it->second;
+    else return it->second;
 }
 
-// Return inode entry
-const inode_entry* SealFSData::lookup_entry(fuse_ino_t parent, const char* name){
+
+const std::optional<std::reference_wrapper<inode_entry>> SealFSData::lookup_entry(fuse_ino_t parent, const char* name){
+    logger->info("[lookup_entry] parent: {} name: {}", parent, name);
     fuse_ino_t cur_ino = lookup(parent, name);
-    std::cerr << std::format("[lookup_entry] parent: {} name: {}\n", parent, name);
-    if(cur_ino == static_cast<fuse_ino_t>(-1)){
-        // TODO: Add logging here
-        std::cerr << std::format("\tlookup(parent={}, name={}) returned -1\n", parent, name);
-        return nullptr;
+    if(cur_ino == INVALID_INODE){
+        logger->error("lookup(parent={}, name={}) returned INVALID_INODE", parent, name);
+        return std::nullopt;
     }
     return lookup_entry(cur_ino);
 }
 
-const inode_entry* SealFSData::lookup_entry(fuse_ino_t cur_ino){
-    std::cerr << std::format("[lookup_entry] cur_ino: {}\n", cur_ino);
-    if(cur_ino < LEAF_OFFSET){
-        if(cur_ino >= dir_inodes.size()){
-            // TODO: Add logging here
-            std::cerr << std::format("\tFailed to find dir inode with ino {}, dir_inodes.size() = {}\n", cur_ino, dir_inodes.size());
-            return nullptr;
-        }
-        return &dir_inodes[cur_ino];
+const std::optional<std::reference_wrapper<inode_entry>> SealFSData::lookup_entry(fuse_ino_t cur_ino){
+    logger->info("[lookup_entry] cur_ino: {}", cur_ino);
+
+    auto it = inodes.find(cur_ino);
+    if(it == inodes.end()){
+        logger->error("Failed to find inode {}", cur_ino);
+        return std::nullopt;
     }
-    else{
-        cur_ino -= LEAF_OFFSET;
-        if(cur_ino >= file_inodes.size()){
-            // TODO: Add logging here
-            std::cerr << std::format("\tFailed to find file inode with ino {}, file_inodes.size() = {}\n", cur_ino, file_inodes.size());
-            return nullptr;
-        }
-        return &file_inodes[cur_ino];
-    }
+    return it->second;
 }
 
-// Create file/dir in appropriate list and return ptr to inode_entry
-inode_entry* SealFSData::create_inode_entry(const char* name, sealfs_ino_t type, mode_t mode){
-    mode_t mask;
-    inode_entry* cur_entry = nullptr;
+// Return nullopt iff parent has a child with same name already
+std::optional<std::reference_wrapper<inode_entry>> SealFSData::create_inode_entry(fuse_ino_t parent, const char* name, sealfs_ino_t type, mode_t mode){
+    logger->info("[create_inode_entry] parent: {} name: {} type: {} mode: {}", parent, name, static_cast<int>(type), mode);
 
-    std::cerr << std::format("[create_inode_entry] name: {}, type: {}, mode: {}\n", name, static_cast<int>(type), mode);
+    mode_t mask;
+    const auto cur_ino = next_ino++;
+    auto& cur_entry = inodes[cur_ino];
+
+    auto children = get_children(parent);
+
+    if(!children){
+        logger->error("parent {} passed in is not directory", parent);
+        return std::nullopt;
+    }
+
+    auto& cref = children.value().get();
+    cref[name] = cur_ino;
+
+    cur_entry.st.st_ino = cur_ino;
+
 
     if(type == sealfs_ino_t::FILE){
-        file_inodes.emplace_back();
-        cur_entry = &file_inodes.back();
-        cur_entry->ino = next_file_ino();
-        cur_entry->st.st_ino = next_file_ino();
-        rel_next_file_ino++;
-        cur_entry->st.st_size = 0;
-        cur_entry->st.st_nlink = 1;
+        cur_entry.st.st_size = 0;
+        cur_entry.st.st_nlink = 1;
         mask = S_IFREG;
     }
     else{
-        dirs.emplace_back();
-        dir_inodes.emplace_back();
-        cur_entry = &dir_inodes.back();
-        cur_entry->ino = next_dir_ino();
-        cur_entry->st.st_ino = next_dir_ino();
-        rel_next_dir_ino++;
-        cur_entry->st.st_size = 4096;
-        cur_entry->st.st_nlink = 2;
+        cur_entry.st.st_size = 4096;
+        cur_entry.st.st_nlink = 2;
         mask = S_IFDIR;
     }
 
-    cur_entry->name = strdup(name);
+    cur_entry.name = strdup(name);
 
     time_t now = time(NULL);
-    cur_entry->st.st_atime = now;
-    cur_entry->st.st_mtime = now;
-    cur_entry->st.st_ctime = now;
+    cur_entry.st.st_atime = now;
+    cur_entry.st.st_mtime = now;
+    cur_entry.st.st_ctime = now;
 
     // restrict to permission bits only
-    cur_entry->st.st_mode = mask | (mode & 0777);
+    cur_entry.st.st_mode = mask | (mode & 0777);
+
+    logger->info("Successfully created inode {} with name {} and parent {}", cur_ino, name, parent);
+
     // what to do about uid/gid?
     return cur_entry;
-}
 
-void SealFSData::create_parent_mapping(const char* name, fuse_ino_t child, fuse_ino_t parent){
-    std::cerr << std::format("[create_parent_mapping] name: {}, child: {}, parent: {}\n", name, child, parent);
-    // TODO: Add error checking if name already exists, etc.?
-    dirs[parent][name] = child;
-}
-
-const std::unordered_map<std::string, fuse_ino_t>& SealFSData::get_children(fuse_ino_t parent_ino){
-    std::cerr << std::format("[get_children] parent_ino: {}\n", parent_ino);
-    if(parent_ino < LEAF_OFFSET){
-        if(parent_ino >= dir_inodes.size()){
-            // TODO: Add logging here
-            std::cerr << std::format("\tFailed to find dir inode with ino {}, dir_inodes.size() = {}\n", parent_ino, dir_inodes.size());
-            throw std::exception();
-        }
-        return dirs[parent_ino];
-    }
-    else{
-        std::cerr << std::format("\tExpected parent ino, received file ino\n");
-        // TODO: Make this better
-        throw std::exception();
-    }
 }
 
 DirBuf::DirBuf(fuse_req_t req): req(req), p(nullptr), size(0) {};
@@ -149,10 +326,15 @@ void DirBuf::add_entry(SealFS::SealFSData* fs, const char* name, fuse_ino_t ino)
     // Figure out size of fuse_direntry required to pack. Note that only a fixed number of bits from stat are used, so we don't actually need to pass in the stat struct to get the correct size (name is the only entry of variable length)
     size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
     p = (char*) realloc(p, size);
-    const SealFS::inode_entry* ent = fs->lookup_entry(ino);
+    const auto& ent = fs->lookup_entry(ino);
+
+    // TODO: add logging functionality directly into fs
+    if(!ent){
+        throw std::runtime_error("Could not find entry corresponding to ino");
+    }
 
     // Actually add the fuse_direntry corresponding to this (name, ino) to buffer b
-    fuse_add_direntry(req, p + oldsize, size - oldsize, name, &ent->st, size);
+    fuse_add_direntry(req, p + oldsize, size - oldsize, name, &ent.value().get().st, size);
 }
 
 // Add buffer b to reply, respect offset (off) and maxsize for kernel pagination
@@ -168,4 +350,3 @@ int DirBuf::reply(off_t off, size_t maxsize){
 DirBuf::~DirBuf(){
     free(p);
 }
-

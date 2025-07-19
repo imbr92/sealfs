@@ -17,57 +17,55 @@
 
 void sealfs_init(void* userdata, struct fuse_conn_info *conn){
     (void) conn;
-    std::cerr << std::format("[sealfs_init]\n");
 
     SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(userdata);
+    fs->log_info("[sealfs_init]");
 
-    std::cerr << std::format("\tuserdata successfully casted to SealFSData with size: {}\n", sizeof(*fs));
-
-    SealFS:: inode_entry* root = fs->create_inode_entry("", SealFS::sealfs_ino_t::DIR, 0777);
-
-    std::cerr << std::format("\tRoot dir sucessfully added\n");
-
-    {
-        char* name = "hello.txt";
-        SealFS::inode_entry* ret = fs->create_inode_entry(name, SealFS::sealfs_ino_t::FILE, 0777);
-        fs->create_parent_mapping(name, ret->ino, root->ino);
+    const auto root = fs->create_inode_entry(-1, "", SealFS::sealfs_ino_t::DIR, 0777);
+    if(!root){
+        fs->log_error("Failed to create root dir");
+        return;
     }
 
-    std::cerr << std::format("\thello.txt file sucessfully added\n");
+    fs->log_info("Added root dir");
+
 
     {
-        char* name = "hello2.txt";
-        SealFS::inode_entry* ret = fs->create_inode_entry(name, SealFS::sealfs_ino_t::FILE, 0777);
-        fs->create_parent_mapping(name, ret->ino, root->ino);
+        const char* name = "hello.txt";
+        fs->create_inode_entry(root.value().get().ino, name, SealFS::sealfs_ino_t::FILE, 0777);
+        fs->log_info("Added hello.txt");
     }
 
-    std::cerr << std::format("\thello2.txt file sucessfully added\n");
+    {
+        const char* name = "hello2.txt";
+        fs->create_inode_entry(root.value().get().ino, name, SealFS::sealfs_ino_t::FILE, 0777);
+        fs->log_info("Added hello2.txt");
+    }
 }
 
 void sealfs_lookup(fuse_req_t req, fuse_ino_t parent, const char* name){
-    std::cerr << std::format("[sealfs_lookup] parent: {}, name: {}\n", parent, name);
     struct fuse_entry_param e;
 
     SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
-
-    // std::cerr << "Next Dir Ino: " << fs->next_dir_ino() << '\n';
+    fs->log_info("[sealfs_lookup] parent: {} name: {}", parent, name);
 
     memset(&e, 0, sizeof(e));
 
-    const SealFS::inode_entry* ret = fs->lookup_entry(parent, name);
+    const auto ret = fs->lookup_entry(parent, name);
 
-    if(ret == nullptr){
-        std::cerr << std::format("\tret is nullptr\n");
+    if(!ret){
+        fs->log_error("ret is nullptr");
         fuse_reply_err(req, ENOENT);
     }
     else{
-        e.ino = ret->ino;
+        auto& unwrapped_entry = ret.value().get();
+        e.ino = unwrapped_entry.ino;
         // TODO: Maybe do something else for timeouts?
         e.attr_timeout = 1.0;
         e.entry_timeout = 1.0;
 
-        e.attr = ret->st;
-        std::cerr << std::format("\tret fields are name: {} ino: {} st_ino: {}\n", ret->name, ret->ino, ret->st.st_ino);
+        e.attr = unwrapped_entry.st;
+        fs->log_info("ret fields are name: {} ino: {} st_ino: {}", unwrapped_entry.name, unwrapped_entry.ino, unwrapped_entry.st.st_ino);
 
         fuse_reply_entry(req, &e);
     }
@@ -75,75 +73,55 @@ void sealfs_lookup(fuse_req_t req, fuse_ino_t parent, const char* name){
 
 void sealfs_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
     (void) fi;
-    std::cerr << std::format("[sealfs_getattr] ino: {}\n", ino);
 
     SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
-    const SealFS::inode_entry* ret = fs->lookup_entry(ino);
-    if(ret == nullptr){
-        std::cerr << std::format("\tret is nullptr\n");
+    fs->log_info("[sealfs_getattr] ino: {}", ino);
+
+    const auto ret = fs->lookup_entry(ino);
+    if(!ret){
+        fs->log_error("ret is nullptr");
         fuse_reply_err(req, ENOENT);
     }
     else{
         // TODO: Maybe do something else for timeouts?
         const double attr_timeout = 1.0;
-        std::cerr << std::format("\tret fields are name: {} ino: {} st_ino: {}\n", ret->name, ret->ino, ret->st.st_ino);
+        auto& unwrapped_entry = ret.value().get();
+        fs->log_info("ret fields are name: {} ino: {} st_ino: {}", unwrapped_entry.name, unwrapped_entry.ino, unwrapped_entry.st.st_ino);
 
-        fuse_reply_attr(req, &ret->st, attr_timeout);
+        fuse_reply_attr(req, &unwrapped_entry.st, attr_timeout);
     }
 }
 
 void sealfs_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi){
-    std::cerr << std::format("[sealfs_opendir] ino: {}\n", ino);
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_opendir] ino: {}", ino);
 
-    // Optionally store a file handle here if you want to track dir state
+    // TODO: Maybe store file handle here?
     fi->fh = 0;
 
     fuse_reply_open(req, fi);
-}
-
-// Wrapper for buffer containing all fuse_direntrys (not a real struct, conceptual notion)
-struct dirbuf {
-    char *p; // Each fuse_direntry is packed into p
-    size_t size; // Size of p (all packed fuse_direntrys so far)
-};
-
-// Given a possibly existing buffer b of fuse_direntrys, pack in this new one with ino = ino, name = name
-void dirbuf_add(SealFS::SealFSData* fs, fuse_req_t req, struct dirbuf* b, const char* name, fuse_ino_t ino){
-    size_t oldsize = b->size;
-    // Figure out size of fuse_direntry required to pack. Note that only a fixed number of bits from stat are used, so we don't actually need to pass in the stat struct to get the correct size (name is the only entry of variable length)
-    b->size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
-    b->p = (char*) realloc(b->p, b->size);
-    const SealFS::inode_entry* ent = fs->lookup_entry(ino);
-
-    // Actually add the fuse_direntry corresponding to this (name, ino) to buffer b
-    fuse_add_direntry(req, b->p + oldsize, b->size - oldsize, name, &ent->st, b->size);
-}
-
-// Add buffer b to reply, respect offset (off) and maxsize for kernel pagination
-int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize, off_t off, size_t maxsize){
-    if(off < bufsize){
-        return fuse_reply_buf(req, buf + off, std::min(bufsize - off, maxsize));
-    }
-    else{
-        return fuse_reply_buf(req, NULL, 0);
-    }
 }
 
 void sealfs_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi){
     // TODO: Maybe use? If needed might need to implement opendir
     (void) fi;
 
-    std::cerr << std::format("[sealfs_readdir] ino: {} size: {} off: {}\n", ino, size, off);
-
     SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_readdir] ino: {} size: {} off: {}", ino, size, off);
 
     SealFS::DirBuf buf(req);
     buf.add_entry(fs, ".", ino);
-    // TODO: use parent's ino instead of ino here
-    buf.add_entry(fs, "..", ino);
+    buf.add_entry(fs, "..", fs->get_parent(ino));
 
     auto children = fs->get_children(ino);
-    for(const auto &[name, child_ino] : children){
+
+    if(!children){
+        fs->log_error("failed to get children of ino {}. Likely not a directory", ino);
+        fuse_reply_err(req, ENOTDIR);
+        return;
+    }
+
+    for(const auto &[name, child_ino] : children.value().get()){
         buf.add_entry(fs, name.c_str(), child_ino);
     }
 
@@ -189,4 +167,3 @@ const struct fuse_lowlevel_ops sealfs_oper = {
         // .getxattr = hello_ll_getxattr,
         // .removexattr = hello_ll_removexattr,
 };
-

@@ -13,55 +13,135 @@
 #include <string>
 #include <unordered_map>
 
+#include <filesystem>
+#include <regex>
+#include <iostream>
+#include <fstream>
+
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
 namespace SealFS{
 
+static inline const std::filesystem::path expand_user_path(const std::string& path){
+    if(!path.empty() && path[0] == '~'){
+        const char* home = std::getenv("HOME");
+        if(home){
+            return std::filesystem::path(home) / path.substr(1);
+        }
+    }
+    return std::filesystem::path(path);
+}
+
 // TODO: For now, make configurable, etc. later
-static const char* LOG_FILE = "~/sealfs.log";
-static const fuse_ino_t LEAF_OFFSET = std::numeric_limits<fuse_ino_t>::max() >> 1;
+static const std::filesystem::path DEFAULT_PERSISTENCE_ROOT = expand_user_path("~/sealfs");
+static constexpr fuse_ino_t INVALID_INODE = static_cast<fuse_ino_t>(-1);
+
+// RAII-style persistence root lock to ensure that a fs is not mounted in multiple places at once
+class SealFSLock{
+private:
+    std::filesystem::path lock_path_;
+    int fd_ = -1;
+public:
+
+    SealFSLock();
+    SealFSLock(SealFSLock&& oth);
+    SealFSLock& operator=(SealFSLock&& oth);
+    SealFSLock(const std::filesystem::path& persistence_root);
+    ~SealFSLock();
+
+    SealFSLock(const SealFSLock&) = delete;
+    SealFSLock& operator=(const SealFSLock&) = delete;
+};
 
 enum class sealfs_ino_t { FILE, DIR };
 
-struct inode_entry {
+struct inode_entry{
     // TODO: Probably not even needed separately if its stored in stat already...
     fuse_ino_t ino;
+    fuse_ino_t parent;
+    // TODO: Maybe remove
+    std::string name;
+
+    // TODO: Maybe remove, S_ISDIR(st.st_mode) and S_ISREG(st.st_mode) can do the same thing
+    sealfs_ino_t type;
     struct stat st;
 
-    char* name;
-    sealfs_ino_t type;
-
-    // Probably not needed..., don't plan on this being fully in memory
-    // void *data;
-    // size_t data_len;
+    std::optional<std::unordered_map<std::string, fuse_ino_t>> children;
 };
 
-struct SealFSData{
+void to_json(json& j, const inode_entry& inode);
+void from_json(const json& j, inode_entry& inode);
+
+
+class SealFSData{
 private:
-    fuse_ino_t rel_next_dir_ino = 1, rel_next_file_ino = 2;
-    std::vector<inode_entry> file_inodes{2}, dir_inodes{1};
-    // TODO: Consider std::string_view + external std::string storage for lookups to not require std::string creation on each call
-    std::vector<std::unordered_map<std::string, fuse_ino_t>> dirs{1};
+    fuse_ino_t next_ino = 1;
+    SealFSLock plock;
+    std::filesystem::path persistence_root;
+    std::shared_ptr<spdlog::logger> logger;
+    std::unordered_map<fuse_ino_t, inode_entry> inodes;
+
+    inline std::filesystem::path get_log_path(){
+        return persistence_root / "sealfs.log";
+    }
+
+    inline std::filesystem::path get_structure_path(){
+        return persistence_root / "structure.json";
+    }
+
+    inline std::filesystem::path get_data_path(){
+        return persistence_root / "data";
+    }
+
+    void validate_persistence_root();
+    // TODO: At some point switch over to an atomic write
+    bool write_structure_to_disk();
+    bool read_structure_from_disk();
 
 public:
-    fuse_ino_t next_dir_ino();
+    SealFSData();
+    SealFSData(const std::filesystem::path& path);
+    ~SealFSData();
 
-    fuse_ino_t next_file_ino();
 
-    // Only return inode num
+    fuse_ino_t get_parent(fuse_ino_t node);
+
+    // std::optional<std::reference_wrapper<T>> since non-owning nullable reference + don't want to pass around raw ptrs
+    const std::optional<std::reference_wrapper<std::unordered_map<std::string, fuse_ino_t>>> get_children(fuse_ino_t node);
+
+    // TODO: Maybe string_view this?
     fuse_ino_t lookup(fuse_ino_t parent, const char* name);
+    const std::optional<std::reference_wrapper<inode_entry>> lookup_entry(fuse_ino_t parent, const char* name);
+    const std::optional<std::reference_wrapper<inode_entry>> lookup_entry(fuse_ino_t cur_ino);
+    // Return nullopt iff parent has a child with same name already
+    std::optional<std::reference_wrapper<inode_entry>> create_inode_entry(fuse_ino_t parent, const char* name, sealfs_ino_t type, mode_t mode);
 
-    // Return inode entry
-    const inode_entry* lookup_entry(fuse_ino_t parent, const char* name);
+    // TODO: Replace all internal logger-> calls with calls to these
+    template<typename... Args>
+    void log_info(fmt::format_string<Args...> fmt, Args&&... args){
+        logger->info(fmt, std::forward<Args>(args)...);
+    }
 
-    const inode_entry* lookup_entry(fuse_ino_t cur_ino);
+    template<typename... Args>
+    void log_warn(fmt::format_string<Args...> fmt, Args&&... args){
+        logger->warn(fmt, std::forward<Args>(args)...);
+    }
 
-    // Require parent_ino to be a dir
-    const std::unordered_map<std::string, fuse_ino_t>& get_children(fuse_ino_t parent_ino);
+    template<typename... Args>
+    void log_debug(fmt::format_string<Args...> fmt, Args&&... args){
+        logger->debug(fmt, std::forward<Args>(args)...);
+    }
 
-    // Create file/dir in appropriate list and return ptr to inode_entry
-    inode_entry* create_inode_entry(const char* name, sealfs_ino_t type, mode_t mode);
+    template<typename... Args>
+    void log_error(fmt::format_string<Args...> fmt, Args&&... args){
+        logger->error(fmt, std::forward<Args>(args)...);
+    }
 
-    void create_parent_mapping(const char* name, fuse_ino_t child, fuse_ino_t parent);
 };
 
 // Wrapper for buffer containing all fuse_direntrys (not a real struct, conceptual notion)
@@ -73,13 +153,12 @@ private:
 
 public:
     DirBuf(fuse_req_t req);
+    ~DirBuf();
 
     void add_entry(SealFS::SealFSData* fs, const char* name, fuse_ino_t ino);
-
     int reply(off_t off, size_t maxsize);
-
-    ~DirBuf();
 };
+
 
 // Want backing structure to be fairly modular/easy to plug and play
 //  - Everything should just be in SealFSData...
@@ -107,7 +186,7 @@ public:
 //      - inode_entry* create_inode_entry(fuse_ino_t parent, const char* name, sealfs_ino_t type, mode_t mode);
 //          - TODO: figure out return type
 //          - Combine create_inode_entry and create_parent_mapping into single function
-
+//
 //
 // Structure:
 //  - dir_path = Path to backing dir
@@ -120,17 +199,4 @@ public:
 //          - stat info
 //          - fuse_ino_t parent
 //          - std::string name
-// class FSBacking{
-// private:
-//     std::string dir_path;
-//     std::string dir_name;
-//
-//     // Names of files to 
-//     std::unordered_map<fuse_ino_t, std::string> filenames;
-//
-// public:
-//     void get_path();
-//
-// };
-
 } // namespace SealFS
