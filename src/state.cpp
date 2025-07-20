@@ -184,6 +184,8 @@ SealFSData::SealFSData(const std::filesystem::path& path): persistence_root(path
     // TODO: Check whether this can take a std::filesystem::path directly?
     std::filesystem::path log_file = get_log_path();
     logger = spdlog::basic_logger_mt("SealFS Logger", log_file);
+    logger->flush_on(spdlog::level::err);
+
     logger->info("Acquired lock on persistence root {}", persistence_root.string());
 
     validate_persistence_root();
@@ -192,12 +194,14 @@ SealFSData::SealFSData(const std::filesystem::path& path): persistence_root(path
 }
 
 SealFSData::SealFSData(){
-    persistence_root = DEFAULT_PERSISTENCE_ROOT;
+    persistence_root = get_default_persistence_root();
     plock = SealFSLock(persistence_root);
 
     // TODO: Check whether this can take a std::filesystem::path directly?
     std::filesystem::path log_file = get_log_path();
     logger = spdlog::basic_logger_mt("SealFS Logger", log_file);
+    logger->flush_on(spdlog::level::err);
+
     logger->info("Acquired lock on persistence root {}", persistence_root.string());
 
     validate_persistence_root();
@@ -209,6 +213,7 @@ SealFSData::~SealFSData(){
     write_structure_to_disk();
 
     logger->info("Releasing lock on persistence root {}", persistence_root.string());
+    logger->flush();
 }
 
 fuse_ino_t SealFSData::get_parent(fuse_ino_t node){
@@ -233,6 +238,15 @@ const std::optional<std::reference_wrapper<std::unordered_map<std::string, fuse_
 
 fuse_ino_t SealFSData::lookup(fuse_ino_t parent, const char* name){
     logger->info("[lookup] parent: {} name: {}", parent, name);
+
+    if(parent == INVALID_INODE && strcmp(name, "")){
+        if(strcmp(name, "")){
+            // TODO: Do something better than hardcoding this
+            return 1;
+        }
+        else return INVALID_INODE;
+    }
+
     auto children = get_children(parent);
     if(!children.has_value()){
         logger->error("Inode {} has no children", parent);
@@ -277,27 +291,33 @@ std::optional<std::reference_wrapper<inode_entry>> SealFSData::create_inode_entr
     const auto cur_ino = next_ino++;
     auto& cur_entry = inodes[cur_ino];
 
-    auto children = get_children(parent);
+    if(parent != INVALID_INODE){
+        auto children = get_children(parent);
 
-    if(!children){
-        logger->error("parent {} passed in is not directory", parent);
-        return std::nullopt;
+        if(!children){
+            logger->error("parent {} passed in is not directory", parent);
+            return std::nullopt;
+        }
+
+        auto& cref = children.value().get();
+        cref[name] = cur_ino;
     }
 
-    auto& cref = children.value().get();
-    cref[name] = cur_ino;
-
-    cur_entry.st.st_ino = cur_ino;
+    cur_entry.ino = cur_entry.st.st_ino = cur_ino;
+    cur_entry.parent = parent;
+    cur_entry.type = type;
 
 
     if(type == sealfs_ino_t::FILE){
         cur_entry.st.st_size = 0;
         cur_entry.st.st_nlink = 1;
+        cur_entry.children = std::nullopt;
         mask = S_IFREG;
     }
     else{
         cur_entry.st.st_size = 4096;
         cur_entry.st.st_nlink = 2;
+        cur_entry.children.emplace();
         mask = S_IFDIR;
     }
 
@@ -322,19 +342,25 @@ DirBuf::DirBuf(fuse_req_t req): req(req), p(nullptr), size(0) {};
 
 // Given a possibly existing buffer b of fuse_direntrys, pack in this new one with ino = ino, name = name
 void DirBuf::add_entry(SealFS::SealFSData* fs, const char* name, fuse_ino_t ino){
+    fs->log_info("Adding entry name: {} ino: {} to dirbuf", name, ino);
     size_t oldsize = size;
     // Figure out size of fuse_direntry required to pack. Note that only a fixed number of bits from stat are used, so we don't actually need to pass in the stat struct to get the correct size (name is the only entry of variable length)
     size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
     p = (char*) realloc(p, size);
-    const auto& ent = fs->lookup_entry(ino);
+    struct stat st;
+    memset(&st, 0, sizeof(st));
 
-    // TODO: add logging functionality directly into fs
-    if(!ent){
-        throw std::runtime_error("Could not find entry corresponding to ino");
+    if(ino != INVALID_INODE){
+        const auto& ent = fs->lookup_entry(ino);
+        // TODO: add logging functionality directly into fs
+        if(!ent){
+            throw std::runtime_error("Could not find entry corresponding to ino");
+        }
+        memcpy(&st, &ent.value().get().st, sizeof(struct stat));
     }
 
     // Actually add the fuse_direntry corresponding to this (name, ino) to buffer b
-    fuse_add_direntry(req, p + oldsize, size - oldsize, name, &ent.value().get().st, size);
+    fuse_add_direntry(req, p + oldsize, size - oldsize, name, &st, size);
 }
 
 // Add buffer b to reply, respect offset (off) and maxsize for kernel pagination

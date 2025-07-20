@@ -49,9 +49,6 @@ int main(int argc, char* argv[]){
         goto err_out1;
     }
 
-    assert(sealfs_oper.readdir != nullptr);
-
-
     se = fuse_session_new(&args, &sealfs_oper, sizeof(sealfs_oper), fs);
     if(se == NULL){
         goto err_out1;

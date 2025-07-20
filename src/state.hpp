@@ -31,14 +31,18 @@ static inline const std::filesystem::path expand_user_path(const std::string& pa
     if(!path.empty() && path[0] == '~'){
         const char* home = std::getenv("HOME");
         if(home){
-            return std::filesystem::path(home) / path.substr(1);
+            return std::filesystem::path(home) / path.substr(2);
         }
     }
     return std::filesystem::path(path);
 }
 
-// TODO: For now, make configurable, etc. later
-static const std::filesystem::path DEFAULT_PERSISTENCE_ROOT = expand_user_path("~/sealfs");
+inline const std::filesystem::path& get_default_persistence_root() {
+    // TODO: For now, make configurable, etc. later
+    static const std::filesystem::path root = expand_user_path("~/sealfs");
+    return root;
+}
+
 static constexpr fuse_ino_t INVALID_INODE = static_cast<fuse_ino_t>(-1);
 
 // RAII-style persistence root lock to ensure that a fs is not mounted in multiple places at once

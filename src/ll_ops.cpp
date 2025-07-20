@@ -21,7 +21,7 @@ void sealfs_init(void* userdata, struct fuse_conn_info *conn){
     SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(userdata);
     fs->log_info("[sealfs_init]");
 
-    const auto root = fs->create_inode_entry(-1, "", SealFS::sealfs_ino_t::DIR, 0777);
+    const auto root = fs->create_inode_entry(SealFS::INVALID_INODE, "", SealFS::sealfs_ino_t::DIR, 0777);
     if(!root){
         fs->log_error("Failed to create root dir");
         return;
