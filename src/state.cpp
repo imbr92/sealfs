@@ -313,6 +313,13 @@ std::optional<std::reference_wrapper<inode_entry>> SealFSData::create_inode_entr
         cur_entry.st.st_nlink = 1;
         cur_entry.children = std::nullopt;
         mask = S_IFREG;
+
+        auto filepath = get_inode_data_path(cur_ino);
+        int fd = open(filepath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if(fd == -1){
+            log_error("Failed to touch {}.data file on inode_entry creation", cur_ino);
+        }
+        else close(fd);
     }
     else{
         cur_entry.st.st_size = 4096;
@@ -337,6 +344,13 @@ std::optional<std::reference_wrapper<inode_entry>> SealFSData::create_inode_entr
     return cur_entry;
 
 }
+
+// TODO: Maybe add check that it is not directory?
+std::filesystem::path SealFSData::get_inode_data_path(fuse_ino_t ino){
+    std::string filename = std::to_string(ino) + ".data";
+    return get_data_path() / filename;
+}
+
 
 DirBuf::DirBuf(fuse_req_t req): req(req), p(nullptr), size(0) {};
 

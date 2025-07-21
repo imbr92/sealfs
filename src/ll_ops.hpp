@@ -20,6 +20,8 @@ void sealfs_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi);
 
 void sealfs_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi);
 
+void sealfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi);
+
 
 
 extern const struct fuse_lowlevel_ops sealfs_oper;

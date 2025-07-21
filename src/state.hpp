@@ -81,6 +81,10 @@ struct inode_entry{
 void to_json(json& j, const inode_entry& inode);
 void from_json(const json& j, inode_entry& inode);
 
+struct FileHandle{
+    int fd;
+};
+
 
 class SealFSData{
 private:
@@ -125,6 +129,7 @@ public:
     const std::optional<std::reference_wrapper<inode_entry>> lookup_entry(fuse_ino_t cur_ino);
     // Return nullopt iff parent has a child with same name already
     std::optional<std::reference_wrapper<inode_entry>> create_inode_entry(fuse_ino_t parent, const char* name, sealfs_ino_t type, mode_t mode);
+    std::filesystem::path get_inode_data_path(fuse_ino_t ino);
 
     // TODO: Replace all internal logger-> calls with calls to these
     template<typename... Args>

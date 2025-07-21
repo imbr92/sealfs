@@ -196,6 +196,17 @@ void sealfs_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
 
     auto reply = [&](bool access){
         if(access){
+            auto filepath = fs->get_inode_data_path(ino);
+            int fd = open(filepath.c_str(), fi->flags);
+            if(fd == -1){
+                fs->log_error("Failed to get fd for file {} with ino {}", filepath.c_str(), ino);
+                fuse_reply_err(req, errno);
+                return;
+            }
+            // TODO: make sure to delete and call close on fd when calling release()
+            SealFS::FileHandle* h = new SealFS::FileHandle{fd};
+            fi->fh = reinterpret_cast<uint64_t>(h);
+            fs->log_info("Successfully opened file {} with ino: {}", filepath.c_str(), ino);
             fuse_reply_open(req, fi);
         }
         else{
@@ -221,6 +232,29 @@ void sealfs_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
 }
 
 
+// Currently does not support direct_io
+void sealfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi){
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_read] ino: {} size: {} off: {}", ino, size, off);
+
+    SealFS::FileHandle *f = reinterpret_cast<SealFS::FileHandle*>(fi->fh);
+
+    // TODO: Maybe cap size to MAX_READ_SIZE
+
+    std::unique_ptr<char[]> buf = std::make_unique<char[]>(size);
+    ssize_t bytes = pread(f->fd, buf.get(), size, off);
+    if(bytes == -1){
+        fuse_reply_err(req, errno);
+        return;
+    }
+
+    fuse_reply_buf(req, buf.get(), bytes);
+}
+
+
+
+
+
 const struct fuse_lowlevel_ops sealfs_oper = {
     .init = sealfs_init,
     .lookup = sealfs_lookup,
@@ -228,6 +262,7 @@ const struct fuse_lowlevel_ops sealfs_oper = {
 
     // TODO: Figure out why I am warned to put this before open/readdir
     .open = sealfs_open,
+    .read = sealfs_read,
 
     .opendir = sealfs_opendir,
     .readdir = sealfs_readdir,
