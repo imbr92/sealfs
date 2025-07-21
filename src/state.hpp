@@ -84,6 +84,7 @@ void from_json(const json& j, inode_entry& inode);
 
 class SealFSData{
 private:
+    bool initialized = false;
     fuse_ino_t next_ino = 1;
     SealFSLock plock;
     std::filesystem::path persistence_root;
@@ -145,6 +146,9 @@ public:
     void log_error(fmt::format_string<Args...> fmt, Args&&... args){
         logger->error(fmt, std::forward<Args>(args)...);
     }
+
+    inline bool is_initialized(){ return initialized; }
+    inline void set_initialized(bool in){ initialized = in; }
 
 };
 

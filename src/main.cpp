@@ -27,6 +27,7 @@ int main(int argc, char* argv[]){
     }
 
     SealFS::SealFSData* fs = new SealFS::SealFSData();
+    fs->set_initialized(true);
 
     if(opts.show_help){
         printf("usage: %s [options] <mountpoint>\n\n", argv[0]);

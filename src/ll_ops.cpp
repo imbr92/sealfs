@@ -21,25 +21,30 @@ void sealfs_init(void* userdata, struct fuse_conn_info *conn){
     SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(userdata);
     fs->log_info("[sealfs_init]");
 
-    const auto root = fs->create_inode_entry(SealFS::INVALID_INODE, "", SealFS::sealfs_ino_t::DIR, 0777);
-    if(!root){
-        fs->log_error("Failed to create root dir");
-        return;
-    }
 
-    fs->log_info("Added root dir");
+    // TODO: delete at some point...
+    if(!fs->is_initialized()){
+        std::cerr << "Not initialized\n";
+        const auto root = fs->create_inode_entry(SealFS::INVALID_INODE, "", SealFS::sealfs_ino_t::DIR, 0777);
+        if(!root){
+            fs->log_error("Failed to create root dir");
+            return;
+        }
+
+        fs->log_info("Added root dir");
 
 
-    {
-        const char* name = "hello.txt";
-        fs->create_inode_entry(root.value().get().ino, name, SealFS::sealfs_ino_t::FILE, 0777);
-        fs->log_info("Added hello.txt");
-    }
+        {
+            const char* name = "hello.txt";
+            fs->create_inode_entry(root.value().get().ino, name, SealFS::sealfs_ino_t::FILE, 0777);
+            fs->log_info("Added hello.txt");
+        }
 
-    {
-        const char* name = "hello2.txt";
-        fs->create_inode_entry(root.value().get().ino, name, SealFS::sealfs_ino_t::FILE, 0777);
-        fs->log_info("Added hello2.txt");
+        {
+            const char* name = "hello2.txt";
+            fs->create_inode_entry(root.value().get().ino, name, SealFS::sealfs_ino_t::FILE, 0777);
+            fs->log_info("Added hello2.txt");
+        }
     }
 }
 
@@ -129,15 +134,90 @@ void sealfs_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, stru
 }
 
 void sealfs_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
-	 //    * Valid replies:
-	 // *   fuse_reply_open
-	 // *   fuse_reply_err
-	 // *
-	 // * @param req request handle
-	 // * @param ino the inode number
-	 // * @param fi file information
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_open] ino: {}", ino);
 
+    const auto c_ent = fs->lookup_entry(ino);
 
+    // TODO: Maybe refactor/split out safe unwrap elsewhere?
+    if(!c_ent){
+        fs->log_error("Could not find corresponding inode_entry for ino: {}", ino);
+        fuse_reply_err(req, EINVAL);
+        return;
+    }
+    const auto& unwrapped_ent = c_ent.value().get();
+
+    // Contains user uid and gid
+    // We only check primary gid, secondary gid is not easily accessible via ctx
+    const struct fuse_ctx *ctx = fuse_req_ctx(req);
+
+    // TODO: refactor
+    auto check_read_perms = [](uid_t ctx_uid, gid_t ctx_gid, uid_t file_uid, gid_t file_gid, mode_t file_perms) -> bool{
+        if (ctx_uid == 0) return true;
+        bool allowed = false;
+        if(ctx_uid == file_uid){
+            allowed = allowed || (file_perms & S_IRUSR);
+        }
+        if(ctx_gid == file_gid){
+            allowed = allowed || (file_perms & S_IRGRP);
+        }
+        allowed = allowed || (file_perms & S_IROTH);
+        return allowed;
+    };
+
+    auto check_write_perms = [](uid_t ctx_uid, gid_t ctx_gid, uid_t file_uid, gid_t file_gid, mode_t file_perms) -> bool{
+        if (ctx_uid == 0) return true;
+        bool allowed = false;
+        if(ctx_uid == file_uid){
+            allowed = allowed || (file_perms & S_IWUSR);
+        }
+        if(ctx_gid == file_gid){
+            allowed = allowed || (file_perms & S_IWGRP);
+        }
+        allowed = allowed || (file_perms & S_IWOTH);
+        return allowed;
+    };
+
+    bool read_allowed = check_read_perms(
+        ctx->uid,
+        ctx->gid,
+        unwrapped_ent.st.st_uid,
+        unwrapped_ent.st.st_gid,
+        unwrapped_ent.st.st_mode
+    );
+
+    bool write_allowed = check_write_perms(
+        ctx->uid,
+        ctx->gid,
+        unwrapped_ent.st.st_uid,
+        unwrapped_ent.st.st_gid,
+        unwrapped_ent.st.st_mode
+    );
+
+    auto reply = [&](bool access){
+        if(access){
+            fuse_reply_open(req, fi);
+        }
+        else{
+            fs->log_error("User does not have sufficient access to open ino {}", ino);
+            fuse_reply_err(req, EACCES);
+        }
+    };
+
+    int32_t accmode = fi->flags & O_ACCMODE;
+    if(accmode == O_WRONLY){
+        reply(write_allowed);
+    }
+    else if(accmode == O_RDONLY){
+        reply(read_allowed);
+    }
+    else if(accmode == O_RDWR){
+        reply(read_allowed && write_allowed);
+    }
+    else{
+        fs->log_error("User is requesting unknown access type");
+        fuse_reply_err(req, EINVAL);
+    }
 }
 
 
