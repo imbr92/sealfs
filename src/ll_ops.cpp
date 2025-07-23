@@ -251,6 +251,15 @@ void sealfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct 
     fuse_reply_buf(req, buf.get(), bytes);
 }
 
+void sealfs_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_release] ino: {}", ino);
+
+    SealFS::FileHandle* hptr = reinterpret_cast<SealFS::FileHandle*>(fi->fh);
+    delete hptr;
+
+    fuse_reply_err(req, 0);
+}
 
 
 
@@ -263,6 +272,7 @@ const struct fuse_lowlevel_ops sealfs_oper = {
     // TODO: Figure out why I am warned to put this before open/readdir
     .open = sealfs_open,
     .read = sealfs_read,
+    .release = sealfs_release,
 
     .opendir = sealfs_opendir,
     .readdir = sealfs_readdir,
