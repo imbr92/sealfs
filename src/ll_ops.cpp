@@ -286,6 +286,47 @@ void sealfs_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t size, 
     fuse_reply_write(req, bytes);
 }
 
+void sealfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode, struct fuse_file_info *fi){
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_create] parent: {} name: {} mode: {}", parent, name, mode);
+
+    if(fs->lookup(parent, name) != SealFS::INVALID_INODE){
+        fuse_reply_err(req, EEXIST);
+        return;
+    }
+
+    const auto& it = fs->create_inode_entry(parent, name, SealFS::sealfs_ino_t::FILE, mode);
+
+    if(!it){
+        // TODO: Maybe make more specific at some point
+        fuse_reply_err(req, EINVAL);
+        return;
+    }
+
+    const auto unwrapped_ent = it.value().get();
+
+    struct fuse_entry_param e;
+    memset(&e, 0, sizeof(e));
+    e.ino = unwrapped_ent.ino;
+    e.generation = 0;
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+    e.attr = unwrapped_ent.st;
+
+    auto filepath = fs->get_data_ent_path(unwrapped_ent.data_id);
+    int fd = open(filepath.c_str(), O_CREAT | O_RDWR, mode);
+    if(fd == -1){
+        fs->log_error("Failed to get fd for newly created file {} with ino {}", filepath.c_str(), e.ino);
+        fuse_reply_err(req, errno);
+        return;
+    }
+
+    SealFS::FileHandle* h = new SealFS::FileHandle{fd};
+    fi->fh = reinterpret_cast<uint64_t>(h);
+    fs->log_info("Successfully opened file {} with ino: {}", filepath.c_str(), e.ino);
+
+    fuse_reply_create(req, &e, fi);
+}
 
 
 
@@ -305,6 +346,8 @@ const struct fuse_lowlevel_ops sealfs_oper = {
 
     .opendir = sealfs_opendir,
     .readdir = sealfs_readdir,
+
+    .create = sealfs_create,
 
     /*
      * Basics:
