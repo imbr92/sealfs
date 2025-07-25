@@ -68,6 +68,7 @@ struct inode_entry{
     // TODO: Probably not even needed separately if its stored in stat already...
     fuse_ino_t ino;
     fuse_ino_t parent;
+    uint32_t data_id; // Id corresponding to data being added
     // TODO: Maybe remove
     std::string name;
 
@@ -90,6 +91,7 @@ class SealFSData{
 private:
     bool initialized = false;
     fuse_ino_t next_ino = 1;
+    uint32_t next_data_id = 1;
     SealFSLock plock;
     std::filesystem::path persistence_root;
     std::shared_ptr<spdlog::logger> logger;
@@ -129,7 +131,8 @@ public:
     const std::optional<std::reference_wrapper<inode_entry>> lookup_entry(fuse_ino_t cur_ino);
     // Return nullopt iff parent has a child with same name already
     std::optional<std::reference_wrapper<inode_entry>> create_inode_entry(fuse_ino_t parent, const char* name, sealfs_ino_t type, mode_t mode);
-    std::filesystem::path get_inode_data_path(fuse_ino_t ino);
+    std::optional<std::reference_wrapper<inode_entry>> cow_inode_entry(fuse_ino_t parent, const char* name, mode_t mode, fuse_ino_t to_copy);
+    std::filesystem::path get_data_ent_path(uint32_t data_id);
 
     // TODO: Replace all internal logger-> calls with calls to these
     template<typename... Args>
@@ -212,4 +215,5 @@ public:
 //          - stat info
 //          - fuse_ino_t parent
 //          - std::string name
+//          - data file id
 } // namespace SealFS

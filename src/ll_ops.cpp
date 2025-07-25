@@ -196,7 +196,7 @@ void sealfs_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
 
     auto reply = [&](bool access){
         if(access){
-            auto filepath = fs->get_inode_data_path(ino);
+            auto filepath = fs->get_data_ent_path(unwrapped_ent.data_id);
             int fd = open(filepath.c_str(), fi->flags);
             if(fd == -1){
                 fs->log_error("Failed to get fd for file {} with ino {}", filepath.c_str(), ino);
@@ -261,6 +261,32 @@ void sealfs_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
     fuse_reply_err(req, 0);
 }
 
+void sealfs_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t size, off_t off, struct fuse_file_info *fi){
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_write] ino: {} size: {} off: {}", ino, size, off);
+
+    SealFS::FileHandle *f = reinterpret_cast<SealFS::FileHandle*>(fi->fh);
+
+    ssize_t bytes = pwrite(f->fd, buf, size, off);
+    if(bytes == -1){
+        fuse_reply_err(req, errno);
+        return;
+    }
+    const auto& cur_ent = fs->lookup_entry(ino);
+
+    if(!cur_ent){
+        fs->log_info("Could not find inode_entry corresponding to ino: {}", ino);
+        fuse_reply_err(req, errno);
+        return;
+    }
+
+    auto& unwrapped_ent = cur_ent.value().get();
+    unwrapped_ent.st.st_size += bytes;
+
+    fuse_reply_write(req, bytes);
+}
+
+
 
 
 
@@ -272,6 +298,9 @@ const struct fuse_lowlevel_ops sealfs_oper = {
     // TODO: Figure out why I am warned to put this before open/readdir
     .open = sealfs_open,
     .read = sealfs_read,
+
+    .write = sealfs_write,
+
     .release = sealfs_release,
 
     .opendir = sealfs_opendir,
@@ -285,10 +314,4 @@ const struct fuse_lowlevel_ops sealfs_oper = {
      *  - Open/Close flow: open, release
      *  - Optional but Useful: flush, fsync, init, destroy
      */
-    // .fuse_lowlevel_init = stuff
-        // .open = hello_ll_open,
-        // .read = hello_ll_read,
-        // .setxattr = hello_ll_setxattr,
-        // .getxattr = hello_ll_getxattr,
-        // .removexattr = hello_ll_removexattr,
 };

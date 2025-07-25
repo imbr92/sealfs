@@ -74,6 +74,7 @@ void SealFS::to_json(json& j, const inode_entry& inode){
         {"parent", inode.parent},
         {"name", inode.name},
         {"type", inode.type},
+        {"data_id", inode.data_id},
         {"st", {
             {"ino", inode.st.st_ino},
             {"nlink", inode.st.st_nlink},
@@ -94,6 +95,7 @@ void SealFS::from_json(const json& j, inode_entry& inode){
     inode.parent = j.at("parent").get<fuse_ino_t>();
     inode.name = j.at("name").get<std::string>();
     inode.type = j.at("type").get<sealfs_ino_t>();
+    inode.data_id = j.at("data_id").get<uint32_t>();
 
     inode.st = {};
     inode.st.st_ino = j.at("st").at("ino").get<ino_t>();
@@ -283,8 +285,10 @@ const std::optional<std::reference_wrapper<inode_entry>> SealFSData::lookup_entr
     return it->second;
 }
 
+// TODO: Accept uid, gid
 // Return nullopt iff parent has a child with same name already
 std::optional<std::reference_wrapper<inode_entry>> SealFSData::create_inode_entry(fuse_ino_t parent, const char* name, sealfs_ino_t type, mode_t mode){
+
     logger->info("[create_inode_entry] parent: {} name: {} type: {} mode: {}", parent, name, static_cast<int>(type), mode);
 
     mode_t mask;
@@ -307,14 +311,14 @@ std::optional<std::reference_wrapper<inode_entry>> SealFSData::create_inode_entr
     cur_entry.parent = parent;
     cur_entry.type = type;
 
-
     if(type == sealfs_ino_t::FILE){
         cur_entry.st.st_size = 0;
         cur_entry.st.st_nlink = 1;
         cur_entry.children = std::nullopt;
+        cur_entry.data_id = next_data_id++;
         mask = S_IFREG;
 
-        auto filepath = get_inode_data_path(cur_ino);
+        auto filepath = get_data_ent_path(cur_entry.data_id);
         int fd = open(filepath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
         if(fd == -1){
             log_error("Failed to touch {}.data file on inode_entry creation", cur_ino);
@@ -345,9 +349,61 @@ std::optional<std::reference_wrapper<inode_entry>> SealFSData::create_inode_entr
 
 }
 
+// only possible on files
+std::optional<std::reference_wrapper<inode_entry>> SealFSData::cow_inode_entry(fuse_ino_t parent, const char* name, mode_t mode, fuse_ino_t to_copy){
+    logger->info("[cow_inode_entry] parent: {} name: {} mode: {} to_copy: {}", parent, name, mode, to_copy);
+
+    mode_t mask;
+    const auto cur_ino = next_ino++;
+    auto& cur_entry = inodes[cur_ino];
+
+    auto children = get_children(parent);
+
+    if(!children){
+        logger->error("parent {} passed in is not directory", parent);
+        return std::nullopt;
+    }
+
+    auto& cref = children.value().get();
+    cref[name] = cur_ino;
+
+    const auto& copy_entry = inodes[to_copy];
+
+    if(copy_entry.type != sealfs_ino_t::FILE){
+        logger->error("ino to_copy {} passed in is not file", to_copy);
+        return std::nullopt;
+    }
+
+    cur_entry.ino = cur_entry.st.st_ino = cur_ino;
+    cur_entry.parent = parent;
+    cur_entry.type = sealfs_ino_t::FILE;
+    cur_entry.data_id = copy_entry.data_id;
+
+    cur_entry.st.st_size = copy_entry.st.st_size;
+    cur_entry.st.st_nlink = 1;
+    cur_entry.children = std::nullopt;
+    mask = S_IFREG;
+
+    cur_entry.name = strdup(name);
+
+    time_t now = time(NULL);
+    cur_entry.st.st_atime = now;
+    cur_entry.st.st_mtime = copy_entry.st.st_mtime;
+    cur_entry.st.st_ctime = now;
+
+    // restrict to permission bits only
+    cur_entry.st.st_mode = mask | (mode & 0777);
+
+    logger->info("Successfully copy-on-write of inode {} with name {} and parent {} copying to_copy {}", cur_ino, name, parent, to_copy);
+
+    // what to do about uid/gid?
+    return cur_entry;
+}
+
+
 // TODO: Maybe add check that it is not directory?
-std::filesystem::path SealFSData::get_inode_data_path(fuse_ino_t ino){
-    std::string filename = std::to_string(ino) + ".data";
+std::filesystem::path SealFSData::get_data_ent_path(uint32_t data_id){
+    std::string filename = std::to_string(data_id) + ".data";
     return get_data_path() / filename;
 }
 
