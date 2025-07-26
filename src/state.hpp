@@ -121,7 +121,7 @@ public:
 
 
     fuse_ino_t get_parent(fuse_ino_t node);
-    bool remove(fuse_ino_t node);
+    bool remove(fuse_ino_t node, sealfs_ino_t expected_type);
 
     // std::optional<std::reference_wrapper<T>> since non-owning nullable reference + don't want to pass around raw ptrs
     const std::optional<std::reference_wrapper<std::unordered_map<std::string, fuse_ino_t>>> get_children(fuse_ino_t node);

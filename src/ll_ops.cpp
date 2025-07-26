@@ -340,7 +340,7 @@ void sealfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name){
         return;
     }
 
-    bool wks = fs->remove(ino);
+    bool wks = fs->remove(ino, SealFS::sealfs_ino_t::FILE);
     if(wks){
         fuse_reply_err(req, 0);
     }
@@ -381,6 +381,27 @@ void sealfs_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mo
     fuse_reply_entry(req, &e);
 }
 
+void sealfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name){
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_rmdir] parent: {} name: {}", parent, name);
+
+    fuse_ino_t ino = fs->lookup(parent, name);
+    if(ino == SealFS::INVALID_INODE){
+        fs->log_info("Could not find inode corresponding to parent: {} name: {}", parent, name);
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+
+    bool wks = fs->remove(ino, SealFS::sealfs_ino_t::DIR);
+    if(wks){
+        fuse_reply_err(req, 0);
+    }
+    else{
+        // TODO: Make clearer later with ENOTDIR and ENOTEMPTY
+        fuse_reply_err(req, EINVAL);
+    }
+
+}
 
 
 
@@ -390,7 +411,9 @@ const struct fuse_lowlevel_ops sealfs_oper = {
     .getattr = sealfs_getattr,
 
     .mkdir = sealfs_mkdir,
+
     .unlink = sealfs_unlink,
+    .rmdir = sealfs_rmdir,
 
     .open = sealfs_open,
     .read = sealfs_read,

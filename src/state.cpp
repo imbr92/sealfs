@@ -242,7 +242,7 @@ fuse_ino_t SealFSData::get_parent(fuse_ino_t node){
 }
 
 // Remove all references to this node, if data has 0 other refs, also delete corresponding data.
-bool SealFSData::remove(fuse_ino_t node){
+bool SealFSData::remove(fuse_ino_t node, sealfs_ino_t expected_type){
     auto entry = lookup_entry(node);
     if(!entry){
         return false;
@@ -250,8 +250,18 @@ bool SealFSData::remove(fuse_ino_t node){
 
     auto& unwrapped_ent = entry.value().get();
 
+    if(unwrapped_ent.type != expected_type){
+        return false;
+    }
+
     fuse_ino_t parent_ino = unwrapped_ent.parent;
     auto it = inodes.find(parent_ino);
+
+    if(expected_type == sealfs_ino_t::DIR && unwrapped_ent.children.value().size() != 0){
+        logger->warn("Failed to delete dir {} since it is nonempty", node);
+        return false;
+    }
+
     if(it != inodes.end()){
         auto& parent_map = it->second.children;
         if(parent_map){
@@ -263,11 +273,17 @@ bool SealFSData::remove(fuse_ino_t node){
         }
     }
 
-    auto data_ent_path = get_data_ent_path(unwrapped_ent.data_id);
-    bool wks = std::filesystem::remove(data_ent_path);
-    logger->info("Status of removing data ent path for ino {} is {}", node, wks);
-    inodes.erase(inodes.find(node));
-    return wks;
+    if(unwrapped_ent.type == sealfs_ino_t::FILE){
+        auto data_ent_path = get_data_ent_path(unwrapped_ent.data_id);
+        bool wks = std::filesystem::remove(data_ent_path);
+        logger->info("Status of removing data ent path for ino {} is {}", node, wks);
+        inodes.erase(inodes.find(node));
+        return wks;
+    }
+    else{
+        inodes.erase(inodes.find(node));
+        return true;
+    }
 }
 
 

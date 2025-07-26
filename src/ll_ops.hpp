@@ -32,6 +32,8 @@ void sealfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name);
 
 void sealfs_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode);
 
+void sealfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name);
+
 
 
 
