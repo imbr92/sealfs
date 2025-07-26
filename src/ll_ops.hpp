@@ -28,6 +28,8 @@ void sealfs_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t size, 
 
 void sealfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode, struct fuse_file_info *fi);
 
+void sealfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name);
+
 
 
 

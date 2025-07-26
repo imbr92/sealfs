@@ -328,6 +328,28 @@ void sealfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t m
     fuse_reply_create(req, &e, fi);
 }
 
+// TODO: Modify to support CoW
+void sealfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name){
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_unlink] parent: {} name: {}", parent, name);
+
+    fuse_ino_t ino = fs->lookup(parent, name);
+    if(ino == SealFS::INVALID_INODE){
+        fs->log_info("Could not find inode corresponding to parent: {} name: {}", parent, name);
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+
+    bool wks = fs->remove(ino);
+    if(wks){
+        fuse_reply_err(req, 0);
+    }
+    else{
+        fuse_reply_err(req, EINVAL);
+    }
+}
+
+
 
 
 
@@ -336,7 +358,8 @@ const struct fuse_lowlevel_ops sealfs_oper = {
     .lookup = sealfs_lookup,
     .getattr = sealfs_getattr,
 
-    // TODO: Figure out why I am warned to put this before open/readdir
+    .unlink = sealfs_unlink,
+
     .open = sealfs_open,
     .read = sealfs_read,
 
@@ -348,6 +371,7 @@ const struct fuse_lowlevel_ops sealfs_oper = {
     .readdir = sealfs_readdir,
 
     .create = sealfs_create,
+
 
     /*
      * Basics:

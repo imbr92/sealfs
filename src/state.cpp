@@ -169,11 +169,25 @@ bool SealFSData::read_structure_from_disk(){
         std::ifstream in(get_structure_path());
         if(!in.is_open() || in.peek() == std::ifstream::traits_type::eof()){
             logger->warn("structure.json does not exist or is empty, initializing empty inodes");
+
+            const auto root = create_inode_entry(SealFS::INVALID_INODE, "", SealFS::sealfs_ino_t::DIR, 0777);
+            if(!root){
+                logger->error("Failed to create root dir");
+                return false;
+            }
             return true;
         }
         nlohmann::json j;
         in >> j;
         inodes = j.get<std::unordered_map<fuse_ino_t, inode_entry>>();
+        fuse_ino_t max_ino = 0;
+        uint32_t max_data_id = 0;
+        for(const auto &[ino, ent] : inodes){
+            max_ino = std::max(max_ino, ino);
+            max_data_id = std::max(max_data_id, ent.data_id);
+        }
+        next_ino = max_ino + 1;
+        next_data_id = max_data_id + 1;
         return true;
     }
     catch(const std::exception& e){
@@ -226,6 +240,36 @@ fuse_ino_t SealFSData::get_parent(fuse_ino_t node){
     }
     return it->second.parent;
 }
+
+// Remove all references to this node, if data has 0 other refs, also delete corresponding data.
+bool SealFSData::remove(fuse_ino_t node){
+    auto entry = lookup_entry(node);
+    if(!entry){
+        return false;
+    }
+
+    auto& unwrapped_ent = entry.value().get();
+
+    fuse_ino_t parent_ino = unwrapped_ent.parent;
+    auto it = inodes.find(parent_ino);
+    if(it != inodes.end()){
+        auto& parent_map = it->second.children;
+        if(parent_map){
+            auto& unwrapped_pmap = parent_map.value();
+            auto ino_it = unwrapped_pmap.find(unwrapped_ent.name);
+            if(ino_it != unwrapped_pmap.end()){
+                unwrapped_pmap.erase(ino_it);
+            }
+        }
+    }
+
+    auto data_ent_path = get_data_ent_path(unwrapped_ent.data_id);
+    bool wks = std::filesystem::remove(data_ent_path);
+    logger->info("Status of removing data ent path for ino {} is {}", node, wks);
+    inodes.erase(inodes.find(node));
+    return wks;
+}
+
 
 const std::optional<std::reference_wrapper<std::unordered_map<std::string, fuse_ino_t>>> SealFSData::get_children(fuse_ino_t node){
     auto inode_entry = lookup_entry(node);
