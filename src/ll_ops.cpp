@@ -349,6 +349,37 @@ void sealfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name){
     }
 }
 
+void sealfs_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode){
+    SealFS::SealFSData* fs = static_cast<SealFS::SealFSData*>(fuse_req_userdata(req));
+    fs->log_info("[sealfs_mkdir] parent: {} name: {} mode: {}", parent, name, mode);
+
+    if(fs->lookup(parent, name) != SealFS::INVALID_INODE){
+        fuse_reply_err(req, EEXIST);
+        return;
+    }
+
+    const auto& it = fs->create_inode_entry(parent, name, SealFS::sealfs_ino_t::DIR, mode);
+
+    if(!it){
+        // TODO: Maybe make more specific at some point
+        fuse_reply_err(req, EINVAL);
+        return;
+    }
+
+    const auto unwrapped_ent = it.value().get();
+
+    struct fuse_entry_param e;
+    memset(&e, 0, sizeof(e));
+    e.ino = unwrapped_ent.ino;
+    e.generation = 0;
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+    e.attr = unwrapped_ent.st;
+
+    fs->log_info("Created directory {} with inode {}", name, unwrapped_ent.ino);
+
+    fuse_reply_entry(req, &e);
+}
 
 
 
@@ -358,6 +389,7 @@ const struct fuse_lowlevel_ops sealfs_oper = {
     .lookup = sealfs_lookup,
     .getattr = sealfs_getattr,
 
+    .mkdir = sealfs_mkdir,
     .unlink = sealfs_unlink,
 
     .open = sealfs_open,
@@ -371,6 +403,7 @@ const struct fuse_lowlevel_ops sealfs_oper = {
     .readdir = sealfs_readdir,
 
     .create = sealfs_create,
+
 
 
     /*
